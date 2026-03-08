@@ -2,11 +2,12 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 import json
 import os
+import time
 
 app = Flask(__name__)
 CORS(app)  # 解决跨域
 
-# 评论存储文件
+# 评论存储文件（Vercel 上为临时存储，重启后会清空）
 COMMENT_FILE = "comments.json"
 
 # 初始化评论文件
@@ -32,7 +33,6 @@ def add_comment():
     if not data or not data.get("name") or not data.get("content"):
         return jsonify({"status": "error", "message": "Name and content are required!"}), 400
     
-    import time
     new_comment = {
         "id": str(int(time.time())),
         "name": data["name"],
