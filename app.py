@@ -1,53 +1,81 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-import json
 import os
 import time
+import json
+import requests
 
 app = Flask(__name__)
-CORS(app)  # 解决跨域
+CORS(app)  # 解决跨域问题
 
-# 评论存储文件（Vercel 上为临时存储，重启后会清空）
-COMMENT_FILE = "comments.json"
+# Upstash Redis REST API 配置
+UPSTASH_REDIS_URL = os.environ.get("KV_REST_API_URL", "")
+UPSTASH_REDIS_TOKEN = os.environ.get("KV_REST_API_TOKEN", "")
 
-# 初始化评论文件
-def init_comments():
-    if not os.path.exists(COMMENT_FILE):
-        with open(COMMENT_FILE, "w", encoding="utf-8") as f:
-            json.dump([], f)
+def redis_command(command, *args):
+    """通过 REST API 执行 Redis 命令"""
+    if not UPSTASH_REDIS_URL or not UPSTASH_REDIS_TOKEN:
+        raise Exception("Upstash Redis 环境变量未配置")
+    
+    url = f"{UPSTASH_REDIS_URL}/{command}"
+    headers = {"Authorization": f"Bearer {UPSTASH_REDIS_TOKEN}"}
+    data = json.dumps(args)
+    
+    response = requests.post(url, headers=headers, data=data)
+    response.raise_for_status()
+    return response.json()["result"]
 
 # 获取所有评论
 @app.route('/api/comments', methods=['GET'])
 def get_comments():
-    init_comments()
-    with open(COMMENT_FILE, "r", encoding="utf-8") as f:
-        comments = json.load(f)
-    comments.sort(key=lambda x: x["time"], reverse=True)
-    return jsonify({"status": "success", "comments": comments})
+    try:
+        comments_json = redis_command("GET", "comments")
+        comments = json.loads(comments_json) if comments_json else []
+        comments.sort(key=lambda x: x["time"], reverse=True)
+        return jsonify({"status": "success", "comments": comments})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 # 提交评论
 @app.route('/api/comment', methods=['POST'])
 def add_comment():
-    init_comments()
     data = request.get_json()
     if not data or not data.get("name") or not data.get("content"):
-        return jsonify({"status": "error", "message": "Name and content are required!"}), 400
+        return jsonify({"status": "error", "message": "姓名和评论内容不能为空！"}), 400
     
-    new_comment = {
-        "id": str(int(time.time())),
-        "name": data["name"],
-        "content": data["content"],
-        "time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-    }
-    
-    with open(COMMENT_FILE, "r", encoding="utf-8") as f:
-        comments = json.load(f)
-    comments.append(new_comment)
-    with open(COMMENT_FILE, "w", encoding="utf-8") as f:
-        json.dump(comments, f, ensure_ascii=False, indent=2)
-    
-    return jsonify({"status": "success", "message": "Comment submitted successfully!", "comment": new_comment})
+    try:
+        new_comment = {
+            "id": str(int(time.time())),
+            "name": data["name"].strip(),
+            "content": data["content"].strip(),
+            "time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+        }
+        
+        # 获取现有评论
+        comments_json = redis_command("GET", "comments")
+        comments = json.loads(comments_json) if comments_json else []
+        comments.append(new_comment)
+        
+        # 保存回 Redis
+        redis_command("SET", "comments", json.dumps(comments, ensure_ascii=False))
+        
+        return jsonify({
+            "status": "success",
+            "message": "评论提交成功！",
+            "comment": new_comment
+        })
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+# 清空评论（可选，测试用）
+@app.route('/api/comments/clear', methods=['POST'])
+def clear_comments():
+    try:
+        redis_command("SET", "comments", json.dumps([]))
+        return jsonify({"status": "success", "message": "所有评论已清空"})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port)
+    app.run(host='0.0.0.0', port=port, debug=True)
